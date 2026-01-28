@@ -3,22 +3,28 @@ import os
 import string
 import random
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from transformers import pipeline
 
 
 class MyModel:
-    """
-    This is a starter model to get you started. Feel free to modify this file.
-    """
+    def __init__(self, work_path = None):
+        #Tentatively, simply loads distilroberta if work_path is None
+        if work_path is None:
+            self.core = pipeline('fill-mask', model='distilroberta-base') #core unmasker model
+        else:
+            self.core = pipeline('fill-mask', model=work_path)
+    
 
     @classmethod
     def load_training_data(cls):
-        # your code here
-        # this particular model doesn't train
+        # TODO: implement train data load
+        
         return []
 
     @classmethod
     def load_test_data(cls, fname):
-        # your code here
+        # test data is formatted in "one line"; outputs a list of "raw lines"
+        
         data = []
         with open(fname) as f:
             for line in f:
@@ -33,32 +39,56 @@ class MyModel:
                 f.write('{}\n'.format(p))
 
     def run_train(self, data, work_dir):
-        # your code here
+        # TODO: run Trainer
         pass
 
     def run_pred(self, data):
-        # your code here
+        def _pre(s: str) -> str:
+            #preprocessing: add <mask>
+            return s + "<mask>"
+        
+        def _post(out: list[dict]) -> str:
+            #postprocessing: key out three top character choices
+            #<out> is what self.core outputs after
+            
+            chars = [None, None, None]
+            k = 0
+            for D in out:
+                curr_token = D["token_str"]
+                print(f"'{curr_token}'", end=", ")
+                if curr_token[0] not in chars:
+                    chars[k] = curr_token[0]
+                    k += 1
+                if k >= 3:
+                    #found 3 differing characters
+                    break
+            if chars[1] == None:
+                chars[1] = "#"
+            if chars[2] == None:
+                chars[2] = "#"
+            return chars[0] + chars[1] + chars[2]
+        
         preds = []
-        all_chars = string.ascii_letters
-        for inp in data:
-            # this model just predicts a random character each time
-            top_guesses = [random.choice(all_chars) for _ in range(3)]
-            preds.append(''.join(top_guesses))
+        
+        for line in data:
+            print(line, end=": ")
+            line = _pre(line)
+            out = self.core(line)
+            preds.append(_post(out))
+            print()
+        
         return preds
 
     def save(self, work_dir):
-        # your code here
-        # this particular model has nothing to save, but for demonstration purposes we will save a blank file
-        with open(os.path.join(work_dir, 'model.checkpoint'), 'wt') as f:
-            f.write('dummy save')
+        # TODO: implement save based on the train result
+        # tentatively, saves default distilroberta-base (self.core)
+        self.core.save_pretrained(work_dir)
+        return
+        
 
     @classmethod
     def load(cls, work_dir):
-        # your code here
-        # this particular model has nothing to load, but for demonstration purposes we will load a blank file
-        with open(os.path.join(work_dir, 'model.checkpoint')) as f:
-            dummy_save = f.read()
-        return MyModel()
+        return MyModel(work_dir)
 
 
 if __name__ == '__main__':
