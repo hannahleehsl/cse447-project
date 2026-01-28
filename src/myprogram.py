@@ -3,6 +3,7 @@ import os
 import string
 import random
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from transformers import pipeline #Added code
 
 
 class MyModel:
@@ -38,6 +39,9 @@ class MyModel:
 
     def run_pred(self, data):
         # your code here
+        # Added code
+        unmasker = pipeline('fill-mask', model='distilroberta-base')
+
         preds = []
         all_chars = string.ascii_letters
         for inp in data:
