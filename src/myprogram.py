@@ -34,7 +34,7 @@ class MyModel:
 
     @classmethod
     def write_pred(cls, preds, fname):
-        with open(fname, 'wt') as f:
+        with open(fname, 'wt', encoding="utf-8") as f:
             for p in preds:
                 f.write('{}\n'.format(p))
 
