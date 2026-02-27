@@ -10,7 +10,7 @@ import html
 
 TRAIN_PATH = "dataset/linguatools_wiki/"
 DEF_DS = "dataset/linguatools_wiki/ds/"
-SELECT = 4096 #random selection size
+SELECT = 2048 #random selection size
 N = 50 #Number of default iter
 
 class MyModel:
@@ -128,7 +128,8 @@ class MyModel:
     def run_train(self, data, save_dir, train_for = None):
         from datasets import Dataset
         from transformers import AutoTokenizer, AutoModelForMaskedLM
-        from transformers import DataCollatorForLanguageModeling
+        #from transformers import DataCollatorForLanguageModeling
+        from DC import BetweenWordMLMDataCollator
         from transformers import Trainer, TrainingArguments
         import torch
         import gc
@@ -143,7 +144,7 @@ class MyModel:
             print(f"Failed to instantiate a model from {self.work_dir}.")
             input("Loading default model. Press enter to continue.")
             model = AutoModelForMaskedLM.from_pretrained("distilbert/distilroberta-base")
-        data_collator = DataCollatorForLanguageModeling(tokenizer=self.tok, mlm_probability=0.2, random_replace_prob=0, mask_replace_prob=1)
+        data_collator = BetweenWordMLMDataCollator(tokenizer=self.tok, mlm_probability=0.2, random_replace_prob=0, mask_replace_prob=1)
         
         training_args = TrainingArguments(
             output_dir=os.path.join(save_dir),
@@ -153,7 +154,7 @@ class MyModel:
             max_grad_norm=5.0,
             lr_scheduler_type="constant",
             save_steps=10000,
-            num_train_epochs=3,
+            num_train_epochs=4,
             weight_decay=0.01,
             logging_steps=64,
         )
@@ -187,9 +188,9 @@ class MyModel:
     def run_pred(self, data):
         def _pre(s: str) -> str:
             #preprocessing: add <mask>
-            return s + "<mask>"
+            return s + "<mask></s>"
         
-        def _post(out: list[dict]) -> str:
+        def _post(out: list[dict], was_spaced) -> str:
             #postprocessing: key out three top character choices
             #<out> is what self.core outputs after
             
@@ -197,9 +198,13 @@ class MyModel:
             k = 0
             for D in out:
                 curr_token = D["token_str"]
+                if (was_spaced or (" " in chars)) and curr_token[0].isspace():
+                    curr_char = None if len(curr_token.lstrip()) == 0 else curr_token.lstrip()[0]
+                else:
+                    curr_char = curr_token[0]
                 print(f"'{curr_token}'", end=", ")
-                if curr_token[0] not in chars:
-                    chars[k] = curr_token[0]
+                if curr_char not in chars:
+                    chars[k] = curr_char
                     k += 1
                 if k >= 3:
                     #found 3 differing characters
@@ -214,9 +219,10 @@ class MyModel:
         
         for line in data:
             print(line, end=": ")
+            spaced = line[-1].isspace()
             line = _pre(line)
             out = self.core(line)
-            preds.append(_post(out))
+            preds.append(_post(out, spaced))
             print()
         
         return preds
