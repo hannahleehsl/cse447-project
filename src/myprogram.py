@@ -151,7 +151,7 @@ class MyModel:
             dataloader_pin_memory=False,
             eval_strategy="no",
             learning_rate=5e-5,
-            max_grad_norm=5.0,
+            max_grad_norm=0,
             lr_scheduler_type="constant",
             save_steps=10000,
             num_train_epochs=4,
@@ -188,7 +188,7 @@ class MyModel:
     def run_pred(self, data):
         def _pre(s: str) -> str:
             #preprocessing: add <mask>
-            return s + "<mask></s>"
+            return s + "<mask>"
         
         def _post(out: list[dict], was_spaced) -> str:
             #postprocessing: key out three top character choices
@@ -197,6 +197,8 @@ class MyModel:
             chars = [None, None, None]
             k = 0
             for D in out:
+                if D["token"] in self.tok.all_special_ids:
+                    continue #pass special tokens
                 curr_token = D["token_str"]
                 if (was_spaced or (" " in chars)) and curr_token[0].isspace():
                     curr_char = None if len(curr_token.lstrip()) == 0 else curr_token.lstrip()[0]

@@ -27,7 +27,6 @@ class BetweenWordMLMDataCollator(DataCollatorForLanguageModeling):
         labels = []
         for (k,input) in enumerate(inputs):
             pre_len = len(input)
-            print(self.tokenizer.decode(input))
             fail = True
             for _ in range(TRIES):
                 crit_ind = random.randint(TOK_FROM, TOK_TO) #the index of token being considered for mask
@@ -62,7 +61,6 @@ class BetweenWordMLMDataCollator(DataCollatorForLanguageModeling):
             
             label = torch.full(input.shape, -100)
             label[-1] = repl_tok
-            print(self.tokenizer.decode(input))
             
             #even out shape
             if len(input) < pre_len:
@@ -75,7 +73,6 @@ class BetweenWordMLMDataCollator(DataCollatorForLanguageModeling):
             
             labels.append(label)
             inputs[k] = input
-            print(len(input), len(label))
         if self.mask_replace_prob == 1 or self.random_replace_prob == 0:
             return inputs, torch.stack(labels)
         else:
