@@ -12,6 +12,7 @@ TRAIN_PATH = "dataset/linguatools_wiki/"
 DEF_DS = "dataset/linguatools_wiki/ds/"
 SELECT = 2048 #random selection size
 N = 50 #Number of default iter
+TOPK = 10 #top_k to use in prediction
 
 class MyModel:
     def __init__(self, work_path = None):
@@ -200,7 +201,10 @@ class MyModel:
                 if D["token"] in self.tok.all_special_ids:
                     continue #pass special tokens
                 curr_token = D["token_str"]
-                if (was_spaced or (" " in chars)) and curr_token[0].isspace():
+                curr_token = curr_token.replace("\n", "")
+                if len(curr_token) == 0:
+                    continue #bruh
+                if was_spaced and curr_token[0].isspace():
                     curr_char = None if len(curr_token.lstrip()) == 0 else curr_token.lstrip()[0]
                 else:
                     curr_char = curr_token[0]
@@ -223,7 +227,7 @@ class MyModel:
             print(line, end=": ")
             spaced = line[-1].isspace()
             line = _pre(line)
-            out = self.core(line)
+            out = self.core(line, top_k = TOPK)
             preds.append(_post(out, spaced))
             print()
         
