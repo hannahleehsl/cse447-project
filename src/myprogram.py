@@ -1,286 +1,212 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import os
-import string
-import random
+import sys
+import math
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from typing import List, Tuple, Dict
+
 import torch
-from transformers import pipeline, AutoTokenizer
-import xml.etree.ElementTree as ET
-import html
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-TRAIN_PATH = "dataset/linguatools_wiki/"
-DEF_DS = "dataset/linguatools_wiki/ds/"
-SELECT = 4096 #random selection size
-N = 50 #Number of default iter
 
+# -------------------------
+# Config
+# -------------------------
+DEFAULT_BASE_MODEL = "gpt2"
+TOPK_TOKENS = 800          # take top-k next tokens, then derive 3 distinct chars
+BATCH_SIZE = 32            # adjust for speed/memory
+MAX_INPUT_LEN = 256        # truncate long prefixes for speed
+MODEL_SUBDIR_CANDIDATES = ["FINAL", "final", "model", ""]  # try these under work_dir
+
+
+# -------------------------
+# IO helpers
+# -------------------------
+def load_test_data(fname: str) -> List[str]:
+    data = []
+    with open(fname, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            data.append(line[:-1])  # strip newline
+    return data
+
+
+def write_pred(preds: List[str], fname: str) -> None:
+    with open(fname, "wt", encoding="utf-8") as f:
+        for p in preds:
+            # EXACTLY 3 chars per line (grader truncates, but keep clean)
+            if len(p) < 3:
+                p = p + ("#" * (3 - len(p)))
+            f.write(p[:3] + "\n")
+
+
+# -------------------------
+# Prediction logic
+# -------------------------
+
+
+def pick_top3_chars_from_logits(
+    tokenizer: AutoTokenizer,
+    logits: torch.Tensor,
+    topk_tokens: int = TOPK_TOKENS
+) -> str:
+    # Get the top-k token ids
+    top_ids = torch.topk(logits, k=topk_tokens).indices.tolist()
+
+    chars: List[str] = []
+    for tid in top_ids:
+        # Decode the token (this automatically turns Ġ into a normal space!)
+        tok_str = tokenizer.decode([tid])
+        
+        # Skip empty strings
+        if len(tok_str) == 0:
+            continue
+            
+        # Grab the very first character of the decoded token
+        first_char = tok_str[0]
+        
+        # Add it to our list if it's unique
+        if first_char not in chars:
+            chars.append(first_char)
+            
+        # Stop once we have 3 predictions
+        if len(chars) == 3:
+            return "".join(chars)
+
+    # Fallback just in case
+    while len(chars) < 3:
+        chars.append("#")
+    return "".join(chars[:3])
+
+
+# -------------------------
+# Model loader
+# -------------------------
+def resolve_model_dir(work_dir: str) -> str:
+    """
+    work_dir should be a local directory containing a fine-tuned model.
+    We'll try common subdirs like work/FINAL.
+    """
+    if not os.path.isdir(work_dir):
+        raise FileNotFoundError(f"--work_dir must be a local directory, got: {work_dir}")
+
+    # If work_dir itself looks like a HF model dir, accept it
+    if os.path.exists(os.path.join(work_dir, "config.json")):
+        return work_dir
+
+    # Try common subfolders
+    for sub in MODEL_SUBDIR_CANDIDATES:
+        cand = os.path.join(work_dir, sub) if sub else work_dir
+        if os.path.exists(os.path.join(cand, "config.json")):
+            return cand
+
+    raise FileNotFoundError(
+        f"Could not find a saved model in {work_dir}.\n"
+        f"Expected to see config.json in {work_dir} or one of: "
+        f"{', '.join([os.path.join(work_dir, s) for s in MODEL_SUBDIR_CANDIDATES if s])}.\n"
+        f"Fine-tune GPT-2 offline and save it into {work_dir}/FINAL (recommended)."
+    )
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+# -------------------------
+# Main class
+# -------------------------
 class MyModel:
-    def __init__(self, work_path = None):
-        #Tentatively, simply loads distilroberta if work_path is None
-        if work_path is None:
-            self.core = pipeline('fill-mask', model='distilroberta-base') #core unmasker model
-        else:
-            self.core = pipeline('fill-mask', model=work_path)
-        self.tok = AutoTokenizer.from_pretrained("distilbert/distilroberta-base")
-        self.tok.pad_token = self.tok.eos_token
-        self.work_dir = work_path
-    
-    @classmethod
-    def _traverse(cls, root) -> str:
-        #text-traverse
-        c = ""
-        c += html.unescape(" ".join(root.text.split()) if isinstance(root.text, str) else "")
-        if len(c) > 0:
-            c += "\n"
-        if root.tag == "wikipedia":
-            c = []
-            for l in root:
-                d = cls._traverse(l)
-                if len(d) > 0:
-                    c.append(html.unescape(l.attrib["name"]) + "\n" + d)
-            return c
-        else:
-            for l in root:
-                d = len(c)
-                c += cls._traverse(l)
-                if len(c) > d:
-                    c += "\n"
-            if len(c) > 0 and (not c.isspace()):
-                return c[:-1] + html.unescape(" ".join(root.tail.split()) if isinstance(root.tail, str) else "")
-            else:
-                return html.unescape(" ".join(root.tail.split()) if isinstance(root.tail, str) else "")
-    
-    def load_training_data(self, ds = None):
-        import gc
-        from datasets import load_from_disk, Dataset
-        import datasets
-        import torch
-        if torch.cuda.is_available():
-            torch.set_default_device("cuda")
-        if ds is None:
-            if not os.path.isdir(TRAIN_PATH):
-                assert False, f"Train directory does not exist ({TRAIN_PATH})"
-            l = os.listdir(TRAIN_PATH)
-            l = [x for x in l if (len(x) > 4) and (x[-4:].lower() == ".xml")]
-            
-            if len(l) == 0:
-                assert False, f"Train directory does not exist ({TRAIN_PATH})"
-            A = dict()
-            
-            for f in l:
-                print(f, end=": ")
-                curr = MyModel._traverse(ET.parse(os.path.join(TRAIN_PATH,f)).getroot())
-                print(len(curr))
-                A[f] = curr
-                gc.collect()
-            
-            
-            for k in A:
-                A[k] = self._preprocess(A[k])
-                gc.collect()
-                A[k] = A[k].train_test_split(0.2)
-                A[k].save_to_disk(os.path.join(DEF_DS, "tempdir", k))
-            D = Dataset.from_dict({})
-            D = D.train_test_split(0.1)
-            D["train"] = datasets.concatenate_datasets([A[k]["test"] for k in A])
-            D["test"] = datasets.concatenate_datasets([A[k]["test"] for k in A])
-            
-            print(f"saving to {DEF_DS}")
-            D.save_to_disk(DEF_DS)
-        else:
-            D = load_from_disk(ds)
-        
-        return D
+    def __init__(self, work_dir: str):
+        model_dir = resolve_model_dir(work_dir)
+
+        self.device = get_device()
+
+        # Always load local files only (keeps grading reproducible/offline)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+        self.model = AutoModelForCausalLM.from_pretrained(model_dir, local_files_only=True)
+
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.model.to(self.device)
+        self.model.eval()
 
     @classmethod
-    def load_test_data(cls, fname):
-        # test data is formatted in "one line"; outputs a list of "raw lines"
-        
-        data = []
-        with open(fname) as f:
-            for line in f:
-                inp = line[:-1]  # the last character is a newline
-                data.append(inp)
-        return data
-
-    @classmethod
-    def write_pred(cls, preds, fname):
-        with open(fname, 'wt', encoding="utf-8") as f:
-            for p in preds:
-                f.write('{}\n'.format(p))
-    
-    def _preprocess(self, e: list[str], max_seqlen=128) -> ...:
-        #assume the input is a list of complete sentence/paragraphs
-        #"turn it into something suitable for training"
-        #
-        #maximum token sequence length of max_seqlen.
-        from datasets import Dataset
-        
-        T = self.tok(e) #{"input_ids": ..., "attention_mask": ...}
-        
-        S = {"input_ids": [], "attention_mask": []}
-        for x in T["input_ids"]:
-            c = [x[i : i+max_seqlen] for i in range(0, len(x), max_seqlen)]
-            S["input_ids"] += c
-            S["attention_mask"] += [[1 for _ in range(len(i))] for i in c]
-        
-        return Dataset.from_dict(S)
-    
-    def run_train(self, data, save_dir, train_for = None):
-        from datasets import Dataset
-        from transformers import AutoTokenizer, AutoModelForMaskedLM
-        from transformers import DataCollatorForLanguageModeling
-        from transformers import Trainer, TrainingArguments
-        import torch
-        import gc
-        import time
-        print(data)
-        if torch.cuda.is_available():
-            torch.set_default_device("cuda")
-        
-        try:
-            model = AutoModelForMaskedLM.from_pretrained(self.work_dir)
-        except:
-            print(f"Failed to instantiate a model from {self.work_dir}.")
-            input("Loading default model. Press enter to continue.")
-            model = AutoModelForMaskedLM.from_pretrained("distilbert/distilroberta-base")
-        data_collator = DataCollatorForLanguageModeling(tokenizer=self.tok, mlm_probability=0.2, random_replace_prob=0, mask_replace_prob=1)
-        
-        training_args = TrainingArguments(
-            output_dir=os.path.join(save_dir),
-            dataloader_pin_memory=False,
-            eval_strategy="no",
-            learning_rate=5e-5,
-            max_grad_norm=5.0,
-            lr_scheduler_type="constant",
-            save_steps=10000,
-            num_train_epochs=3,
-            weight_decay=0.01,
-            logging_steps=64,
-        )
-        #will train on the SELECT=4096 random selection
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=data["train"],
-            eval_dataset=data["test"],
-            data_collator=data_collator,
-            processing_class=self.tok,
-        )
-        tsize = len(data["train"])
-        random.seed() #ensure seed "itself is randomized"
-        print("Train iterations:", N)
-        for i in range(N if train_for is None else train_for):
-            training_args.output_dir=os.path.join(save_dir,f"iter {i}")
-            #will train on the SELECT=4096 random selection
-            P = data["train"].select([random.randint(0,tsize) for _ in range(SELECT * i, SELECT * (i + 1))])
-            
-            trainer.train_dataset=P
-            print(trainer.train_dataset[0])
-            print(f"Starting Trainer (iteration {i})", time.time())
-            trainer.train()
-            print("===============")
-        print("finished.")
-        
-        trainer.save_model(os.path.join(save_dir,f"FINAL"))
-        
-
-    def run_pred(self, data):
-        def _pre(s: str) -> str:
-            #preprocessing: add <mask>
-            return s + "<mask>"
-        
-        def _post(out: list[dict]) -> str:
-            #postprocessing: key out three top character choices
-            #<out> is what self.core outputs after
-            
-            chars = [None, None, None]
-            k = 0
-            for D in out:
-                curr_token = D["token_str"]
-                print(f"'{curr_token}'", end=", ")
-                if curr_token[0] not in chars:
-                    chars[k] = curr_token[0]
-                    k += 1
-                if k >= 3:
-                    #found 3 differing characters
-                    break
-            if chars[1] == None:
-                chars[1] = "#"
-            if chars[2] == None:
-                chars[2] = "#"
-            return chars[0] + chars[1] + chars[2]
-        
-        preds = []
-        
-        for line in data:
-            print(line, end=": ")
-            line = _pre(line)
-            out = self.core(line)
-            preds.append(_post(out))
-            print()
-        
-        return preds
-
-    def save(self, work_dir):
-        # TODO: implement save based on the train result
-        # tentatively, saves default distilroberta-base (self.core)
-        self.core.save_pretrained(work_dir)
-        return
-        
-
-    @classmethod
-    def load(cls, work_dir):
+    def load(cls, work_dir: str):
         return MyModel(work_dir)
 
+    def run_pred(self, lines: List[str]) -> List[str]:
+        preds: List[str] = []
 
-if __name__ == '__main__':
+        # batch for speed
+        for i in range(0, len(lines), BATCH_SIZE):
+            batch = lines[i:i + BATCH_SIZE]
+            batch = [s[-MAX_INPUT_LEN:] for s in batch]  # truncate for speed
+
+            enc = self.tokenizer(
+                batch,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=MAX_INPUT_LEN,
+            )
+            enc = {k: v.to(self.device) for k, v in enc.items()}
+
+            with torch.no_grad():
+                out = self.model(**enc)
+                # logits: (B, T, V); take last non-pad position per row
+                logits = out.logits
+
+            # Find last token position for each sequence via attention_mask
+            attn = enc.get("attention_mask", None)
+            if attn is None:
+                # fallback: assume full length
+                last_pos = torch.full((logits.size(0),), logits.size(1) - 1, device=self.device, dtype=torch.long)
+            else:
+                last_pos = attn.sum(dim=1) - 1  # (B,)
+
+            for b in range(logits.size(0)):
+                lp = int(last_pos[b].item())
+                next_logits = logits[b, lp, :]  # (V,)
+                pred3 = pick_top3_chars_from_logits(self.tokenizer, next_logits, topk_tokens=TOPK_TOKENS)
+                preds.append(pred3)
+
+        return preds
+
+
+# -------------------------
+# CLI
+# -------------------------
+def main():
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument('mode', choices=('train', 'test'), help='what to run')
-    parser.add_argument('--work_dir', help='where to save', default='work')
-    parser.add_argument('--train_ds', help='path to dataset directory', default='')
-    parser.add_argument('--train_save_dir', help='path to save results after training', default='')
-    parser.add_argument('--train_for', help='Number of iterations of training ("epochs")', default='')
-    parser.add_argument('--test_data', help='path to test data', default='example/input.txt')
-    parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
+    parser.add_argument("mode", choices=("train", "test"), help="what to run")
+    parser.add_argument("--work_dir", help="LOCAL directory containing the saved fine-tuned model", default="work")
+    parser.add_argument("--test_data", help="path to test data", default="example/input.txt")
+    parser.add_argument("--test_output", help="path to write test predictions", default="pred.txt")
+
     args = parser.parse_args()
 
-    #random.seed(0)
+    if args.mode == "train":
+        print(
+            "Train mode is intentionally not implemented here.\n"
+            "Per project rules, predict.sh must be inference-only.\n"
+            "Fine-tune GPT-2 offline and save the model to work/FINAL, then run test.\n",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
-    if args.mode == 'train':
-        if not os.path.isdir(args.train_save_dir):
-            print('Making training directory {}'.format(args.train_save_dir))
-            os.makedirs(args.train_save_dir)
-        print('Instatiating model')
-        model = MyModel(args.work_dir)
-        print('Loading training data')
-        if args.train_ds == "":
-            if os.path.isdir(DEF_DS):
-                print(f"DEF_DS ({DEF_DS}) found; loading this dataset")
-                train_data = model.load_training_data(DEF_DS)
-            else:
-                print("No training dataset path specified... will use " + TRAIN_PATH)
-                print("Resulting dataset will be stored in " + DEF_DS)
-                train_data = model.load_training_data()
-        else:
-            train_data = model.load_training_data(args.train_ds)
-        train_for = int(args.train_for) if args.train_for.isnumeric() else None
-        print(f'Training (N = {N if train_for is None else train_for})')
-        if args.train_save_dir == "":
-            input(f"No training save directory specified; the train result will overwrite work_dir ({args.work_dir}).\nPress enter to proceed.")
-            train_to = args.work_dir
-        else:
-            input(f"Train result will be saved to ({args.train_save_dir}).\nPress enter to proceed.")
-            train_to = args.train_save_dir
-        model.run_train(train_data, train_to, train_for = train_for)
-    elif args.mode == 'test':
-        print('Loading model')
+    if args.mode == "test":
         model = MyModel.load(args.work_dir)
-        print('Loading test data from {}'.format(args.test_data))
-        test_data = MyModel.load_test_data(args.test_data)
-        print('Making predictions')
+        test_data = load_test_data(args.test_data)
         pred = model.run_pred(test_data)
-        print('Writing predictions to {}'.format(args.test_output))
-        assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
-        model.write_pred(pred, args.test_output)
-    else:
-        raise NotImplementedError('Unknown mode {}'.format(args.mode))
+        write_pred(pred, args.test_output)
+        return
+
+    raise NotImplementedError(args.mode)
+
+
+if __name__ == "__main__":
+    main()
