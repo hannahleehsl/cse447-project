@@ -150,7 +150,7 @@ class MyModel:
             output_dir=os.path.join(save_dir),
             dataloader_pin_memory=False,
             eval_strategy="no",
-            learning_rate=5e-5,
+            learning_rate=2e-4,
             max_grad_norm=0,
             lr_scheduler_type="constant",
             save_steps=10000,
