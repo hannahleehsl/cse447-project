@@ -10,7 +10,7 @@ import html
 
 TRAIN_PATH = "dataset/linguatools_wiki/"
 DEF_DS = "dataset/linguatools_wiki/ds/"
-SELECT = 2048 #random selection size
+SELECT = 4096 #random selection size
 N = 50 #Number of default iter
 TOPK = 10 #top_k to use in prediction
 
@@ -151,8 +151,8 @@ class MyModel:
             output_dir=os.path.join(save_dir),
             dataloader_pin_memory=False,
             eval_strategy="no",
-            learning_rate=2e-4,
-            max_grad_norm=0,
+            learning_rate=1e-4,
+            max_grad_norm=10,
             lr_scheduler_type="constant",
             save_steps=10000,
             num_train_epochs=4,
@@ -184,6 +184,8 @@ class MyModel:
         print("finished.")
         
         trainer.save_model(os.path.join(save_dir,f"FINAL"))
+        #replace core with the most recent
+        self.core = pipeline('fill-mask', model=os.path.join(save_dir,f"FINAL"))
         
 
     def run_pred(self, data):
@@ -234,8 +236,6 @@ class MyModel:
         return preds
 
     def save(self, work_dir):
-        # TODO: implement save based on the train result
-        # tentatively, saves default distilroberta-base (self.core)
         self.core.save_pretrained(work_dir)
         return
         
