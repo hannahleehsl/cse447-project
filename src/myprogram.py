@@ -97,7 +97,7 @@ class MyModel:
         # test data is formatted in "one line"; outputs a list of "raw lines"
         
         data = []
-        with open(fname) as f:
+        with open(fname, "r", encoding="utf-8") as f:
             for line in f:
                 inp = line[:-1]  # the last character is a newline
                 data.append(inp)
@@ -131,7 +131,8 @@ class MyModel:
         from transformers import AutoTokenizer, AutoModelForMaskedLM
         #from transformers import DataCollatorForLanguageModeling
         from DC import BetweenWordMLMDataCollator
-        from transformers import Trainer, TrainingArguments
+        from Trainer import FirstCharTrainer
+        from transformers import TrainingArguments
         import torch
         import gc
         import time
@@ -152,15 +153,15 @@ class MyModel:
             dataloader_pin_memory=False,
             eval_strategy="no",
             learning_rate=1e-4,
-            max_grad_norm=10,
+            max_grad_norm=100,
             lr_scheduler_type="constant",
             save_steps=10000,
-            num_train_epochs=4,
+            num_train_epochs=6,
             weight_decay=0.01,
-            logging_steps=64,
+            logging_steps=128,
         )
         #will train on the SELECT=4096 random selection
-        trainer = Trainer(
+        trainer = FirstCharTrainer(
             model=model,
             args=training_args,
             train_dataset=data["train"],
@@ -168,6 +169,16 @@ class MyModel:
             data_collator=data_collator,
             processing_class=self.tok,
         )
+        
+        #build first character dictionary
+        print("Building first character dictionary...")
+        raw_tokens = self.tok.batch_decode([i for i in range(len(self.tok))])
+        first_char_lookup = {i:x[0] for (i,x) in enumerate(raw_tokens)}
+        
+        
+        trainer.AVeryUnwieldyNameUsedForSpecificPurpose = first_char_lookup
+        print("done!")
+        
         tsize = len(data["train"])
         random.seed() #ensure seed "itself is randomized"
         print("Train iterations:", N)
@@ -188,12 +199,12 @@ class MyModel:
         self.core = pipeline('fill-mask', model=os.path.join(save_dir,f"FINAL"))
         
 
-    def run_pred(self, data):
+    def run_pred(self, data, be_verbose=""):
         def _pre(s: str) -> str:
             #preprocessing: add <mask>
             return s + "<mask>"
         
-        def _post(out: list[dict], was_spaced) -> str:
+        def _post(out: list[dict], was_spaced, verbose=False) -> str:
             #postprocessing: key out three top character choices
             #<out> is what self.core outputs after
             
@@ -210,7 +221,10 @@ class MyModel:
                     curr_char = None if len(curr_token.lstrip()) == 0 else curr_token.lstrip()[0]
                 else:
                     curr_char = curr_token[0]
-                print(f"'{curr_token}'", end=", ")
+
+                if verbose:
+                    print(f"'{curr_token}'", end=", ")
+
                 if curr_char not in chars:
                     chars[k] = curr_char
                     k += 1
@@ -224,14 +238,14 @@ class MyModel:
             return chars[0] + chars[1] + chars[2]
         
         preds = []
-        
+        verbose = (len(be_verbose) > 0)
         for line in data:
-            print(line, end=": ")
+            if verbose:
+                print(line, end=": ")
             spaced = line[-1].isspace()
             line = _pre(line)
             out = self.core(line, top_k = TOPK)
-            preds.append(_post(out, spaced))
-            print()
+            preds.append(_post(out, spaced, verbose))
         
         return preds
 
@@ -254,6 +268,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_for', help='Number of iterations of training ("epochs")', default='')
     parser.add_argument('--test_data', help='path to test data', default='example/input.txt')
     parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
+    parser.add_argument('--test_verbose', help='whether to exhaustively print all collected/predicted tokens for each test instance', default='')
     args = parser.parse_args()
 
     #random.seed(0)
@@ -290,7 +305,7 @@ if __name__ == '__main__':
         print('Loading test data from {}'.format(args.test_data))
         test_data = MyModel.load_test_data(args.test_data)
         print('Making predictions')
-        pred = model.run_pred(test_data)
+        pred = model.run_pred(test_data, args.test_verbose)
         print('Writing predictions to {}'.format(args.test_output))
         assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
         model.write_pred(pred, args.test_output)
